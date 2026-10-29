@@ -1,0 +1,26 @@
+# Secrets and local credentials
+.env
+.env.*
+!.env.example
+*.pem
+credentials.json
+
+# Local Neo4j checkouts, symlinked for reference. Not part of this repo.
+/neo4j
+/neo4j-cloud
+
+# Neo4j-internal notes and sources. Never publish.
+/internal/
+
+# Run output: Aura passwords, dumps, ledgers
+work/
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.mypy_cache/
+.ruff_cache/
+.DS_Store
