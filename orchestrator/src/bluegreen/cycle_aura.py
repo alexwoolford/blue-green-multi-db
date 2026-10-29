@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import shutil
 import time
 from pathlib import Path
@@ -32,8 +31,6 @@ from bluegreen.state import load_aura, load_routes, save_route, update_aura
 from bluegreen.switch import AliasSwitch, SwitchResult
 from bluegreen.util import utc_now
 from bluegreen.watcher import Watcher
-
-logger = logging.getLogger("bluegreen.aura.cycle")
 
 
 def _rel(ledger: Ledger, path: Path) -> str:
@@ -277,7 +274,6 @@ def _upload_guard(strategy: AliasSwitch, tenant: str, database: str) -> None:
     try:
         current = strategy.current_target(tenant)
     except Neo4jError as exc:
-        logger.info("alias lookup before upload failed: %s", exc)
-        return
+        raise VerificationError(f"refusing to upload: could not read alias target for {tenant}") from exc
     if current == database:
         raise VerificationError(f"refusing to upload: alias {tenant} already points at {database}")
