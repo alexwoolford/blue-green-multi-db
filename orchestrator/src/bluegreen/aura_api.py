@@ -32,8 +32,6 @@ PATHS = {
         "/v2beta1/organizations/{organization_id}/projects/{project_id}"
         "/instances/{instance_id}/databases/{database_id}"
     ),
-    "pause_v1": "/v1/instances/{instance_id}/pause",
-    "resume_v1": "/v1/instances/{instance_id}/resume",
 }
 
 _RETRY_STATUS = {429, 502, 503, 504}
@@ -61,12 +59,6 @@ class AuraClient:
 
     def close(self) -> None:
         self._http.close()
-
-    def __enter__(self) -> "AuraClient":
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        self.close()
 
     def _delay(self, base: float) -> float:
         if base <= 0:
@@ -299,18 +291,6 @@ class AuraClient:
         path = format_path("databases", instance_id=instance_id, **self._ids())
         return _as_list(unwrap(self.get_json(path)))
 
-    def get_database(self, instance_id: str, database_id: str) -> dict[str, Any]:
-        path = format_path(
-            "database",
-            instance_id=instance_id,
-            database_id=database_id,
-            **self._ids(),
-        )
-        data = unwrap(self.get_json(path))
-        if not isinstance(data, dict):
-            raise ApiError("get database response was not an object", error_code="shape")
-        return data
-
     def delete_database(self, instance_id: str, database_id: str) -> None:
         path = format_path(
             "database",
@@ -319,35 +299,6 @@ class AuraClient:
             **self._ids(),
         )
         self.request("DELETE", path, ok=(200, 202, 204, 404))
-
-    def pause_instance(self, instance_id: str) -> httpx.Response:
-        return self._pause_or_resume("pause", instance_id)
-
-    def resume_instance(self, instance_id: str) -> httpx.Response:
-        return self._pause_or_resume("resume", instance_id)
-
-    def _pause_or_resume(self, verb: str, instance_id: str) -> httpx.Response:
-        if self.settings.aura_pause_api == "custom":
-            template = (
-                self.settings.aura_pause_path_template
-                if verb == "pause"
-                else self.settings.aura_resume_path_template
-            )
-            path = template.format(
-                organization_id=self.org_id,
-                project_id=self.project_id,
-                instance_id=instance_id,
-            )
-        else:
-            path = format_path("pause_v1" if verb == "pause" else "resume_v1", instance_id=instance_id)
-        # 4xx other than the retry set is returned to the caller so a rejected pause endpoint can be recorded.
-        # 429/5xx are retried inside request(), then raised.
-        try:
-            return self.request("POST", path, ok=(200, 201, 202, 204))
-        except ApiError as exc:
-            if exc.error_code in {"400", "404", "405", "410", "422"}:
-                raise
-            raise
 
 
 def wait_for(

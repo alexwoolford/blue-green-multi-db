@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import time
 from functools import wraps
 from typing import Optional
 
@@ -11,17 +10,15 @@ import typer
 
 from bluegreen.aura_instance import InstanceGuard, aura_down, aura_reap, aura_status, aura_up
 from bluegreen.config import load_settings
-from bluegreen.cycle_aura import alias_probe, run_aura_cycle
+from bluegreen.cycle_aura import run_aura_cycle
 from bluegreen.cycle_local import local_status, run_local_cycle
 from bluegreen.doctor import run_doctor
 from bluegreen.e2e import run_e2e
 from bluegreen.errors import AppError
 from bluegreen.generator import generate
 from bluegreen.ledger import open_ledger
-from bluegreen.pause_timing import run_pause_timing
 from bluegreen.redact import RedactFormatter, redact
 from bluegreen.report import latest_run_id, write_report
-from bluegreen.watcher import Watcher
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 local_app = typer.Typer(no_args_is_help=True, add_completion=False)
@@ -153,36 +150,6 @@ def aura_cycle_cmd(
         raise
 
 
-@aura_app.command("alias-probe")
-@_guard
-def aura_alias_probe_cmd(
-    probe_delete_aliased: bool = typer.Option(False, "--probe-delete-aliased"),
-    run_id: Optional[str] = typer.Option(None, "--run-id"),
-) -> None:
-    """Check alias support: create two scratch databases and flip an alias between them."""
-    settings = load_settings()
-    ledger = open_ledger(settings.work_path(), run_id)
-    alias_probe(settings, ledger, probe_delete_aliased=probe_delete_aliased)
-
-
-@aura_app.command("pause-timing")
-@_guard
-def aura_pause_cmd(
-    iterations: Optional[int] = typer.Option(None, "--iterations"),
-    run_id: Optional[str] = typer.Option(None, "--run-id"),
-) -> None:
-    """Time pause and resume of the whole instance (default one iteration)."""
-    settings = load_settings()
-    ledger = open_ledger(settings.work_path(), run_id)
-    guard = InstanceGuard(settings, ledger.run_id)
-    guard.install()
-    try:
-        run_pause_timing(settings, ledger, iterations=iterations)
-    except Exception:
-        guard.teardown()
-        raise
-
-
 @aura_app.command("down")
 @_guard
 def aura_down_cmd(
@@ -204,45 +171,6 @@ def aura_reap_cmd(yes: bool = typer.Option(False, "--yes")) -> None:
     aura_reap(load_settings(), yes=True)
 
 
-@app.command("watch")
-@_guard
-def watch_cmd(
-    target: str = typer.Option(..., "--target", help="local or aura"),
-    tenant: str = typer.Option(..., "--tenant"),
-    duration: int = typer.Option(30, "--duration"),
-    run_id: Optional[str] = typer.Option(None, "--run-id"),
-) -> None:
-    """Standalone cutover probe. Prints the watcher file when it stops."""
-    if target not in {"local", "aura"}:
-        from bluegreen.errors import ConfigError
-
-        raise ConfigError("--target must be local or aura")
-    settings = load_settings()
-    ledger = open_ledger(settings.work_path(), run_id)
-    if target == "local":
-        from bluegreen.cypher import local_driver
-        from bluegreen.switch import AliasSwitch
-
-        driver = local_driver(settings)
-        strategy = AliasSwitch(driver)
-    else:
-        from bluegreen.cycle_aura import _driver, _require_state
-        from bluegreen.switch import make_switch
-
-        state = _require_state(settings)
-        driver = _driver(state)
-        strategy = make_switch(driver, settings.switch_mode, state.get("alias_supported"))
-    path = ledger.run_dir / f"watcher-{target}-{tenant}.jsonl"
-    watcher = Watcher(driver, lambda: strategy.resolve(tenant), path)
-    watcher.start()
-    try:
-        time.sleep(duration)
-    finally:
-        watcher.stop()
-        driver.close()
-    print(path)
-
-
 @app.command("report")
 @_guard
 def report_cmd(run_id: Optional[str] = typer.Option(None, "--run-id")) -> None:
@@ -256,7 +184,7 @@ def report_cmd(run_id: Optional[str] = typer.Option(None, "--run-id")) -> None:
 @app.command("e2e")
 @_guard
 def e2e_cmd(yes: bool = typer.Option(False, "--yes")) -> None:
-    """Local baseline, Aura cycles, optional pause/resume (PAUSE_ITERATIONS), report, teardown."""
+    """Local baseline, Aura cycles, report, teardown."""
     _require_yes(yes, "e2e")
     settings = load_settings()
     ledger = run_e2e(settings)

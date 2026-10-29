@@ -1,4 +1,4 @@
-"""Client-side probes during a cutover or a pause."""
+"""Client-side probes during a cutover."""
 
 from __future__ import annotations
 
@@ -17,20 +17,12 @@ _QUERY = "MATCH (s:Snapshot) RETURN s.cycle AS c"
 
 
 class Watcher:
-    def __init__(
-        self,
-        driver,
-        resolve,
-        path: Path,
-        *,
-        interval_s: float = 0.25,
-        probes: tuple[str, ...] = ("managed", "raw"),
-    ):
+    def __init__(self, driver, resolve, path: Path):
         self.driver = driver
         self.resolve = resolve
         self.path = path
-        self.interval_s = interval_s
-        self.probes = probes
+        self.interval_s = 0.25
+        self.probes = ("managed", "raw")
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 

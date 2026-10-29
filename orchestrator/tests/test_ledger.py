@@ -33,9 +33,7 @@ def test_ledger_redacts_and_report_renders(tmp_path):
         "## 2. Answers",
         "## 3. Cycle timings",
         "## 4. Cutover",
-        "## 5. Pause/resume",
-        "## 6. Open questions",
-        "## 7. Not verified by this run",
+        "## 5. Not verified by this run",
     ):
         assert heading in text
     assert "super-secret-password" not in text

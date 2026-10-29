@@ -1,8 +1,8 @@
 # Reference architecture: monthly full refresh with blue/green databases on Aura
 
-**Applies to:** AuraDB Business Critical and Virtual Dedicated Cloud with multiple databases enabled, and self-managed Neo4j Enterprise Edition (appendix).
+**Applies to:** AuraDB Business Critical and Virtual Dedicated Cloud with multiple databases enabled, and self-managed Neo4j Enterprise Edition (appendix). AuraDB Professional and Free do not support multiple databases.
 
-**Status:** draft. The pattern was run end to end on Aura Business Critical on 2026-10-28 ([evidence](docs/evidence/2026-10-28-aura-live-run.md)). Sizes and timings come from a small test and need confirming at production scale.
+**Status:** draft. The pattern was run end to end on Aura Business Critical three times, on 2026-10-28 and 2026-10-29 ([evidence](docs/evidence/2026-10-28-aura-live-run.md)). Sizes and timings come from a small test and need confirming at production scale.
 
 ### How to read this
 
@@ -45,7 +45,7 @@ Changes to the instance itself, such as a version upgrade or a resize, use a dif
 
 Sections 8 and 9 explain the cost and isolation reasons behind this table.
 
-**How far the evidence goes.** The pattern was tested once, with three tenants of about 10MB each, on one 2GB instance in one region. That proves the mechanism works. It does not show how upload time, cutover, or the effect on other tenants change at hundreds of GB or with dozens of tenants. Treat every number in this document as a starting point to measure against.
+**How far the evidence goes.** The pattern was tested in three runs, each with three tenants of about 10MB each, on one 2GB instance in one region. That proves the mechanism works. It does not show how upload time, cutover, or the effect on other tenants change at hundreds of GB or with dozens of tenants. Treat every number in this document as a starting point to measure against.
 
 ## 3. Architecture
 
@@ -84,7 +84,7 @@ flowchart LR
 
 ### Tool version
 
-Aura does not report a precise server version (`dbms.components()` returns a value such as `5.27-aura`), so you cannot match the build tools to it exactly. Follow the compatibility table in the [Operations Manual's upload page](https://neo4j.com/docs/operations-manual/current/database-administration/standard-databases/upload-to-aura/) instead. At the time of writing, dumps made with Neo4j 5.26 LTS, 2025.x, or 2026.x can be uploaded to current Aura. Split dump archives (introduced in 2026.09) are not supported. Pin the tool version in the build environment, and test any upgrade by uploading to a scratch database first. **[Verified]** with Neo4j Enterprise 2026.10.1 tools.
+Aura does not report a precise server version (`dbms.components()` returns a value such as `5.27-aura`), so you cannot match the build tools to it exactly. Follow the compatibility table in the [Operations Manual's upload page](https://neo4j.com/docs/operations-manual/current/database-administration/standard-databases/upload-to-aura/) instead. At the time of writing, dumps made with Neo4j 5.26 LTS, 2025.x, or 2026.x can be uploaded to current Aura. Split dump archives (introduced in 2026.09) are not supported. Uploading to an instance with multiple databases needs `neo4j-admin database upload --to-dbid`, which was added in 2026.07, so the build environment's tools must be 2026.07 or later. Pin the tool version in the build environment, and test any upgrade by uploading to a scratch database first. **[Verified]** with Neo4j Enterprise 2026.10.1 tools.
 
 ### Naming
 
@@ -112,10 +112,10 @@ flowchart LR
 Refresh one tenant at a time. For each tenant:
 
 1. **Build.** **[Verified]** Export CSV from the source system. Run `neo4j-admin database import full`, then `neo4j-admin database dump`. Store the dump in object storage with its build ID. (The harness kept dumps on local disk, not object storage.)
-2. **Create an empty database** with the Aura API (`POST .../instances/{instanceId}/databases`). **[Verified]** On Aura, databases [cannot be created with Cypher](https://neo4j.com/docs/aura/managing-instances/multiple-databases/).
+2. **Create an empty database** with the Aura API (`POST .../instances/{instanceId}/databases`). **[Verified]** On Aura, databases [cannot be created with Cypher](https://neo4j.com/docs/aura/managing-instances/multiple-databases/). The database endpoints are in the beta version of the Aura API (`v2beta1`), so pin the paths and watch for changes.
 3. **Upload** with `neo4j-admin database upload --to-dbid <id>`. **[Verified]** The upload overwrites its target. The orchestrator must refuse to upload into the database the alias currently points at. The harness checks this before every upload.
 4. **Prepare.**
-   - Create indexes and constraints if the dump does not contain them, and wait until every index is `ONLINE` (`SHOW INDEXES`, or `CALL db.awaitIndexes()`). **[Verified]**
+   - Create indexes and constraints if the dump does not contain them, and wait until every index is `ONLINE` (`SHOW INDEXES`, or `CALL db.awaitIndexes()`). **[Verified]** The harness built them after the upload. **[Design guidance]** Building them in the build environment, before the dump, keeps that work off the shared instance.
    - **Apply the tenant's privileges to the new database.** **[Design guidance]** Privileges are attached to the target database, not to the alias. Grants on `acme-r0041` do not carry over to `acme-r0042` (see section 6).
 5. **Check the new database directly**, not through the alias:
    - Node and relationship counts match the build. **[Verified]**
@@ -142,7 +142,7 @@ There are three levels, from fastest to slowest:
 | --- | --- | --- |
 | Instant | Point the alias back to the previous database | Until that database is deleted (step 8) |
 | Minutes | Create a database and upload the previous build's dump from object storage | As long as dumps are retained |
-| Platform | Restore from Aura's database backups. Aura supports [backing up and restoring databases individually](https://neo4j.com/docs/aura/managing-instances/multiple-databases/) | Aura's backup retention |
+| Platform | Restore from Aura's database backups. Aura supports [backing up and restoring databases individually](https://neo4j.com/docs/aura/managing-instances/multiple-databases/). Whether a database the refresh has already deleted can still be restored was not confirmed, so rely on retained dumps for those | Aura's backup retention |
 
 The default is to keep the old database only until the checks through the alias pass, normally a few minutes. This keeps only one tenant doubled at a time (section 7).
 
@@ -174,7 +174,9 @@ Aura charges [by GB-hour of instance memory, regardless of the number of databas
 - **The refresh itself adds nothing to the bill.** The new copy uses disk and a database slot on an instance you already pay for. The exception is when it needs more storage than the instance includes.
 - **Deleting a database does not lower the bill.** It frees disk and a slot.
 
-**Sharing saves money when many small tenants would each need their own instance.** Business Critical sizes start at 2GB and double. Ten tenants that each need less than 2GB cost 10 × 2GB = 20 GB-hours per hour as separate instances. Together they might fit on one 8GB instance, at 8 GB-hours per hour.
+**Sharing saves money when many small tenants would each need their own instance.** Business Critical sizes start at 2GB and double. Ten tenants that each need less than 2GB cost 10 × 2GB = 20 GB-hours per hour as separate Business Critical instances. Together they might fit on one 8GB instance, at 8 GB-hours per hour.
+
+**Separate Professional instances are not a like-for-like alternative.** AuraDB Professional has a lower GB-hour rate and a 1GB minimum, but it does not support multiple databases, and per the [pricing page](https://neo4j.com/pricing/) it is single-zone, with daily backups kept for 7 days and best-effort support. Business Critical is multi-zone with a 99.95% uptime SLA, and adds fine-grained access control (RBAC, PBAC, ABAC), instance-level SSO, IP filtering, 30-day backup retention with hourly point-in-time restore, and 24x7 support.
 
 **Sharing saves nothing when tenants already fill an instance size.** One 8GB instance costs the same as two 4GB instances. Combining two large tenants adds noisy neighbors and a shared failure domain for no saving, so keep them apart.
 
@@ -190,16 +192,11 @@ Every database on an instance runs on the same servers. Expect one tenant to slo
 
 If one tenant is much larger or busier than the rest, give it its own instance and keep the small tenants together.
 
-### Optional: pausing an idle instance
+### Pausing does not fit this pattern
 
-Pausing is not part of the refresh. It only saves money if no tenant needs the data for a long stretch. Per the [Aura instance actions documentation](https://neo4j.com/docs/aura/managing-instances/instance-actions/):
+Blue/green keeps each tenant's live database online between refreshes. Pausing stops the whole instance, so every tenant on it goes offline together, and one database cannot be paused on its own. Keep the instance running.
 
-- A paused instance is billed at a discounted rate.
-- Pausing stops the whole instance. Every tenant on it goes offline together. One database cannot be paused on its own.
-- Aura resumes a paused instance automatically after 30 days.
-- Resuming takes from a few minutes to a few hours.
-
-If any tenant reads the data between refreshes, keep the instance running.
+Pausing does lower the bill: the [pricing page](https://neo4j.com/pricing/) says pausing saves 80% of running costs. So it only suits tenants that do not need the data between refreshes, and those tenants do not need blue/green. Per the [instance actions documentation](https://neo4j.com/docs/aura/managing-instances/instance-actions/), Aura resumes a paused instance automatically after 30 days, which is before the next refresh in a 31-day month, and resuming takes from a few minutes to a few hours. In the first live run, a multiple-database instance paused and resumed in under 3 minutes each, and its aliases and data were intact.
 
 ## 9. Failure handling
 
@@ -264,16 +261,17 @@ Run on 2026-10-28: Aura Business Critical, 2GB, GCP, multiple databases enabled.
 
 - Every step in section 4 marked **[Verified]** ran on Aura through the API and Cypher. Grants and the tenant-user check were not exercised, because the test used the instance admin user. The point-back after a failed check was not needed and was not exercised.
 - Upload took 154 to 185 seconds per tenant. A full tenant refresh took about 3.5 to 4 minutes.
-- **Cutover.** Readers polled each tenant's alias every 250ms:
+- **Cutover.** One client read each tenant's alias in a loop, alternating a managed transaction and an auto-commit query, with a 250ms pause between rounds. That gave about 25 reads per tenant over about 11 seconds around each switch:
   - There were 0 failed reads.
   - The gap between the last read of the old database and the first read of the new one was 0.3 to 1.2 seconds. That is about one polling interval plus query latency.
   - No reader saw the old data again after first seeing the new data.
 - Aliases and data survived a pause and resume of the instance.
 - The same flow ran on self-managed Enterprise Edition 2026.10.1.
+- Two later runs completed with no failed steps: one with the same settings, and one on 2026-10-29 with the current harness. In that run, uploads took 153 to 175 seconds, and cutover again had 0 failed reads, with gaps of 0.28 to 1.16 seconds.
 
-Limits: one run, small data, one region, and one instance size. Timings will not scale linearly.
+Limits: small data, one region, one instance size, and one client reading at a time. Timings will not scale linearly.
 
-Not tested: grants with a non-admin user, rollback, any failure path, the effect of uploads on live tenants, a second instance or custom endpoint, and whether the default `neo4j` database counts toward the database limit.
+Not tested: grants with a non-admin user, rollback, any failure path, the effect of uploads on live tenants, transactions in flight during a switch, a second instance or custom endpoint, and whether the default `neo4j` database counts toward the database limit.
 
 ---
 

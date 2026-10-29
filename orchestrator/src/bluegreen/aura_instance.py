@@ -16,8 +16,8 @@ from bluegreen.cypher import components, connect, show_databases
 from bluegreen.errors import ApiError, ConfigError, OpenQuestionError
 from bluegreen.ledger import Ledger
 from bluegreen.redact import add_secret, redact
-from bluegreen.state import load_aura, save_aura, update_aura
-from bluegreen.util import calver_is_newer, parse_calver, utc_now
+from bluegreen.state import load_aura, load_routes, save_aura
+from bluegreen.util import utc_now
 
 logger = logging.getLogger("bluegreen.aura")
 
@@ -50,8 +50,6 @@ def instance_observation(client: AuraClient, instance_id: str) -> str:
     During destroy, GET by id can stay 500 after the instance has left the list.
     An id missing from the list is treated as gone.
     """
-    from bluegreen.errors import ApiError
-
     try:
         payload = client.get_instance(instance_id, allow_missing=True)
     except ApiError as exc:
@@ -66,8 +64,6 @@ def instance_observation(client: AuraClient, instance_id: str) -> str:
 
 
 def _absent_from_list(client: AuraClient, instance_id: str) -> bool:
-    from bluegreen.errors import ApiError
-
     try:
         rows = client.list_instances()
     except ApiError:
@@ -101,33 +97,12 @@ def _banner(settings: Settings, name: str) -> None:
                 f"  cloud:  {settings.aura_cloud_provider}",
                 f"  region: {settings.aura_region}",
                 "  multi_database: true",
-                "A Business Critical instance is billed while it exists, including while paused",
-                "(at a discounted rate).",
+                "A Business Critical instance is billed while it exists.",
                 "",
             ]
         ),
         file=sys.stderr,
     )
-
-
-def assert_version_guard(settings: Settings, aura_version: str) -> str:
-    try:
-        parse_calver(aura_version)
-    except ValueError:
-        note = (
-            f"Aura dbms.components version {aura_version!r} is not CalVer. "
-            "Aura kept returning 5.27-aura as a client-compatibility string after calendar versioning, "
-            f"so NEO4J_TAG {settings.neo4j_tag} was not treated as newer. "
-            "Whether the dump version is accepted is decided by the upload, not by this string."
-        )
-        logger.warning(note)
-        return note
-    if calver_is_newer(settings.neo4j_tag, aura_version):
-        raise OpenQuestionError(
-            f"[version-guard] NEO4J_TAG {settings.neo4j_tag} is newer than the Aura instance version "
-            f"{aura_version}. Rebuild the toolbox with NEO4J_TAG <= {aura_version}."
-        )
-    return f"NEO4J_TAG {settings.neo4j_tag} is not newer than Aura {aura_version}"
 
 
 def aura_up(settings: Settings, ledger: Ledger) -> dict[str, Any]:
@@ -175,8 +150,6 @@ def aura_up(settings: Settings, ledger: Ledger) -> dict[str, Any]:
                 "multi_database": data.get("multi_database"),
                 "create_response": _public_instance(data),
                 "databases": {},
-                "name_map": {},
-                "alias_supported": None,
                 "org_id": client.org_id,
                 "project_id": client.project_id,
             }
@@ -205,7 +178,7 @@ def aura_up(settings: Settings, ledger: Ledger) -> dict[str, Any]:
 
             transitions = _wait_running(client, instance_id)
             details["transitions"] = transitions
-            _connect_and_record(settings, client, state, details)
+            _connect_and_record(state, details)
             save_aura(settings.work_path(), state)
         return state
     finally:
@@ -243,14 +216,14 @@ def finish_aura_up(settings: Settings, ledger: Ledger) -> dict[str, Any]:
             details["connection_url"] = state.get("connection_url")
             details["multi_database"] = state.get("multi_database")
             details["transitions"] = _wait_running(client, instance_id)
-            _connect_and_record(settings, client, state, details)
+            _connect_and_record(state, details)
             save_aura(settings.work_path(), state)
         return state
     finally:
         client.close()
 
 
-def _connect_and_record(settings: Settings, client: AuraClient, state: dict[str, Any], details: dict[str, Any]) -> None:
+def _connect_and_record(state: dict[str, Any], details: dict[str, Any]) -> None:
     driver = connect(str(state["connection_url"]), str(state["username"]), str(state["password"]))
     try:
         info = components(driver)
@@ -261,15 +234,6 @@ def _connect_and_record(settings: Settings, client: AuraClient, state: dict[str,
     state["aura_edition"] = info.get("edition")
     details["components"] = info
     details["databases"] = databases
-    details["version_guard"] = assert_version_guard(settings, str(info.get("version") or ""))
-    from bluegreen.state import record_oq
-
-    record_oq(
-        settings.work_path(),
-        "OQ-1",
-        f"create succeeded with type={settings.aura_instance_type}",
-        f"instance {state['instance_id']} multi_database={state.get('multi_database')}",
-    )
 
 
 def aura_down(settings: Settings, ledger: Ledger | None = None) -> None:
@@ -288,8 +252,6 @@ def aura_down(settings: Settings, ledger: Ledger | None = None) -> None:
         client.project_id = str(state["project_id"])
     try:
         def _do() -> None:
-            from bluegreen.errors import ApiError
-
             def current() -> str:
                 value = instance_observation(client, instance_id)
                 if value == "404" or value.startswith("api_error:"):
@@ -393,10 +355,7 @@ def aura_status(settings: Settings) -> None:
             print("SHOW DATABASES:")
             for row in show_databases(driver):
                 print(f"  {row['name']}\t{row['currentStatus']}\taliases={row['aliases']}")
-        from bluegreen.state import load_routes
-
         print(f"routes: {load_routes(settings.work_path()).get('aura', {})}")
-        print(f"alias_supported: {state.get('alias_supported')}")
     finally:
         if driver is not None:
             driver.close()
@@ -451,7 +410,7 @@ class InstanceGuard:
         if self.settings.aura_keep_instance:
             print(
                 "LOUD: AURA_KEEP_INSTANCE=true, so the instance was NOT deleted. "
-                f"Instance {instance_id} is still billed, including while paused (at a discounted rate).",
+                f"Instance {instance_id} is still billed.",
                 file=sys.stderr,
             )
             return

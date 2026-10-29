@@ -47,10 +47,6 @@ def routes_path(work: Path) -> Path:
     return state_dir(work) / "routes.json"
 
 
-def oq_path(work: Path) -> Path:
-    return state_dir(work) / "oq.json"
-
-
 def load_aura(work: Path) -> dict[str, Any] | None:
     return read_json(aura_path(work))
 
@@ -75,15 +71,3 @@ def save_route(work: Path, target: str, tenant: str, route: dict[str, Any]) -> N
     routes.setdefault(target, {})
     routes[target][tenant] = route
     write_json(routes_path(work), routes)
-
-
-def load_oq(work: Path) -> dict[str, Any]:
-    return read_json(oq_path(work)) or {}
-
-
-def record_oq(work: Path, oq_id: str, answer: str, evidence: str) -> None:
-    from bluegreen.util import utc_now
-
-    payload = load_oq(work)
-    payload[oq_id] = {"answer": answer, "evidence": evidence, "recorded_at": utc_now()}
-    write_json(oq_path(work), payload)

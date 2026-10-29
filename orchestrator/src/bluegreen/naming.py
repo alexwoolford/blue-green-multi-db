@@ -40,10 +40,6 @@ def db_name(tenant: str, cycle: str) -> str:
     return name
 
 
-def alias_name(tenant: str) -> str:
-    return validate_tenant(tenant)
-
-
 def cycle_number(cycle: str) -> int:
     validate_cycle(cycle)
     return int(cycle[1:])
@@ -59,13 +55,6 @@ def next_cycle(current: str | None) -> str:
     if current is None:
         return "c0001"
     return format_cycle(cycle_number(current) + 1)
-
-
-def prior_cycle(cycle: str) -> str | None:
-    number = cycle_number(cycle)
-    if number <= 1:
-        return None
-    return format_cycle(number - 1)
 
 
 def quote_ident(name: str) -> str:

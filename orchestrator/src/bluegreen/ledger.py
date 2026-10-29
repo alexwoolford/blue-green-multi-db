@@ -10,7 +10,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from bluegreen.errors import AppError
 from bluegreen.redact import redact
 from bluegreen.util import utc_now
 

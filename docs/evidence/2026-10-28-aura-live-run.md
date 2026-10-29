@@ -1,6 +1,6 @@
 # Evidence: live run on Aura Business Critical, 2026-10-28
 
-This is a sanitized copy of the harness report for one `bg e2e --yes` run with `PAUSE_ITERATIONS=1`. (Pause is now off by default.) Instance IDs, connection URLs, the organization and project IDs, and credentials have been removed. The instance was deleted at the end of the run.
+This is a sanitized copy of the harness report for one `bg e2e --yes` run with `PAUSE_ITERATIONS=1`. The harness no longer runs pause (Q3 below), because pausing does not fit blue/green. A second run at 21:14 UTC the same day, with the same settings, also completed with no failed steps. A third run, on 2026-10-29 with the current harness, is summarized at the end. Instance IDs, connection URLs, the organization and project IDs, and credentials have been removed. The instance was deleted at the end of the run.
 
 The full, unsanitized output (ledger, watcher logs, upload logs) stayed in `work/runs/`, which is not committed.
 
@@ -55,7 +55,7 @@ Database names in this run were `<tenant>-c<cycle>`. The reference architecture 
 
 ## Cutover as seen by clients
 
-A watcher read each tenant's `Snapshot.cycle` through the alias during the `c0001` to `c0002` switch. It used two probes, alternating, about every 250ms: a managed transaction and a plain auto-commit query.
+A watcher read each tenant's `Snapshot.cycle` through the alias during the `c0001` to `c0002` switch. It ran two probes in turn, a managed transaction and a plain auto-commit query, then paused 250ms. On Aura each round took about 1 second, because each read took about 0.2 to 1.2 seconds.
 
 These numbers come from the raw watcher files. The report generated during the run had a bug in its cutover summary: it compared against the wrong cycle and showed no "last old" read. The bug is fixed, and regenerating the report from this run's ledger now gives the same numbers as this table.
 
@@ -89,3 +89,13 @@ Reads succeeded until the pause took effect, then failed until the instance was 
 - Data larger than about 10MB per tenant, more than three tenants, other sizes, regions, or clouds.
 
 This was one run. Treat the timings as an example, not a benchmark.
+
+## Later run: 2026-10-29, current harness
+
+One `bg e2e --yes` run with the current harness, which no longer runs pause, the alias probe, or a third cycle. Same tier, size, cloud, tools, tenants, and data sizes as above.
+
+- 132 ledger steps, none failed. Every question (upload, alias switch, self-managed Enterprise Edition, Aura API) passed.
+- Each Aura tenant refresh took 198 to 222 seconds in total. Uploads took 153 to 175 seconds.
+- Cutover through the alias: 28 reads per tenant on Aura and 36 on local Enterprise Edition, with 0 failed reads and no old data seen after new data. The gap between the last old read and the first new read was 0.28 to 1.16 seconds on Aura and about 0.27 seconds locally.
+- On Aura, each `c0002` refresh deleted that tenant's `c0001` database, as in the first run. The local Enterprise Edition server still held each tenant's `c0002` database from an earlier run, so each `c0001` cycle dropped it after moving the alias.
+- The instance was deleted at the end of the run.

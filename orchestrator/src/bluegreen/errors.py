@@ -24,7 +24,7 @@ class VerificationError(AppError):
 
 
 class OpenQuestionError(AppError):
-    """An unresolved hypothesis blocks progress. The message names the hypothesis or OQ."""
+    """An assumption the harness depends on did not hold. The message starts with a [tag]."""
 
     code = 5
 

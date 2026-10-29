@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -12,7 +13,7 @@ from neo4j.exceptions import ClientError, Neo4jError, ServiceUnavailable, Sessio
 
 from bluegreen.errors import VerificationError
 from bluegreen.naming import quote_ident
-from bluegreen.redact import redact
+from bluegreen.util import utc_now
 
 _TRANSIENT = (ServiceUnavailable, SessionExpired, TransientError)
 _SCHEMA_INDEXES = (
@@ -42,18 +43,6 @@ def local_driver(settings):
     return connect(settings.neo4j_local_uri, settings.neo4j_local_user, settings.neo4j_local_password)
 
 
-def _is_admin_tx_rejection(exc: Neo4jError) -> bool:
-    text = f"{getattr(exc, 'code', '')} {exc}".lower()
-    markers = (
-        "managed transaction",
-        "implicit transaction",
-        "cannot be performed",
-        "system",
-        "unsupported administration",
-    )
-    return any(marker in text for marker in markers)
-
-
 def run_autocommit(driver, database: str, query: str, parameters: dict | None = None, timeout: float = 400):
     last: Exception | None = None
     for attempt in range(3):
@@ -69,25 +58,20 @@ def run_autocommit(driver, database: str, query: str, parameters: dict | None = 
 
 
 def run_system(driver, query: str, parameters: dict | None = None, timeout: float = 400) -> tuple[list, str]:
-    """Run a system command. Prefer execute_query, then an auto-commit session.
+    """Run a command on `system`. Prefer execute_query; on a client error, retry once in an auto-commit session.
 
-    Returns (records, path) where path is 'execute_query' or 'autocommit'.
-    Long DDL (CREATE/DROP DATABASE) should call run_autocommit directly so a
-    rejected managed transaction is not executed twice.
+    Returns (records, path) where path is 'execute_query' or 'autocommit'. CREATE/DROP DATABASE call
+    run_autocommit directly.
     """
     try:
         result = driver.execute_query(query, parameters or {}, database_="system")
         return list(result.records), "execute_query"
     except ClientError as exc:
-        if not _is_admin_tx_rejection(exc):
-            # Still fall back once. A syntax error fails the same way on the second path.
-            try:
-                records = run_autocommit(driver, "system", query, parameters, timeout=timeout)
-            except Neo4jError:
-                raise exc
-            return records, "autocommit"
-    records = run_autocommit(driver, "system", query, parameters, timeout=timeout)
-    return records, "autocommit"
+        try:
+            records = run_autocommit(driver, "system", query, parameters, timeout=timeout)
+        except Neo4jError:
+            raise exc
+        return records, "autocommit"
 
 
 def run_read(driver, database: str, query: str, parameters: dict | None = None):
@@ -187,8 +171,6 @@ def wait_until_online(driver, name: str, timeout_s: float, interval_s: float = 2
     transitions: list[dict[str, str]] = []
     deadline = time.monotonic() + timeout_s
     last = None
-    from bluegreen.util import utc_now
-
     while True:
         status = database_status(driver, name)
         if status != last:
@@ -322,14 +304,9 @@ def node_count(driver, database: str) -> int:
     return int(rows[0]["n"]) if rows else 0
 
 
-def create_database(driver, name: str, seed_uri: str | None = None, wait_seconds: int = 300) -> str:
-    ident = quote_ident(name)
-    if seed_uri:
-        query = f"CREATE DATABASE {ident} OPTIONS {{seedURI: '{seed_uri}'}} WAIT {wait_seconds} SECONDS"
-    else:
-        query = f"CREATE DATABASE {ident} WAIT {wait_seconds} SECONDS"
+def create_database(driver, name: str, wait_seconds: int = 300) -> None:
+    query = f"CREATE DATABASE {quote_ident(name)} WAIT {wait_seconds} SECONDS"
     run_autocommit(driver, "system", query, timeout=wait_seconds + 60)
-    return "autocommit"
 
 
 def drop_database(driver, name: str, wait_seconds: int = 300) -> None:
@@ -341,21 +318,7 @@ def drop_alias(driver, name: str) -> None:
     run_system(driver, f"DROP ALIAS {quote_ident(name)} IF EXISTS FOR DATABASE", timeout=60)
 
 
-def seed_provider_settings(driver) -> list[dict[str, str]]:
-    try:
-        records, _ = run_system(
-            driver,
-            "SHOW SETTINGS YIELD name, value WHERE toLower(name) CONTAINS 'seed' RETURN name, value",
-            timeout=60,
-        )
-    except Neo4jError as exc:
-        return [{"name": "error", "value": redact(str(exc))}]
-    return [{"name": record["name"], "value": str(record["value"])} for record in records]
-
-
 def remove_store(root: Path, database: str) -> None:
-    import shutil
-
     for sub in ("databases", "transactions"):
         path = root / sub / database
         if path.exists():

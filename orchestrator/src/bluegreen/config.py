@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from pydantic import Field, model_validator
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from bluegreen.errors import ConfigError
@@ -36,11 +36,6 @@ class Settings(BaseSettings):
     aura_instance_type: str = "business-critical"
     aura_max_runtime_minutes: int = 180
     aura_keep_instance: bool = False
-    aura_pause_api: str = "v1"
-    aura_pause_path_template: str = ""
-    aura_resume_path_template: str = ""
-    pause_hold_seconds: int = 120
-    pause_iterations: int = 0
     neo4j_tag: str = "2026.10.1"
     neo4j_accept_license_agreement: str = "yes"
     neo4j_local_password: str = "change-me-local"
@@ -50,9 +45,7 @@ class Settings(BaseSettings):
     scale: float = 1.0
     seed: int = 42
     admin_heap_size: str = "2g"
-    switch_mode: str = "auto"
     keep_dumps: bool = False
-    import_with_schema: bool = False
     work_dir: str = ""
     toolbox_conf_dir: str = ""
 
@@ -65,31 +58,21 @@ class Settings(BaseSettings):
             raise ValueError(f"NEO4J_TAG must be CalVer YYYY.MM.P, got {self.neo4j_tag!r}")
         if self.scale <= 0:
             raise ValueError("SCALE must be greater than 0")
-        if self.switch_mode not in {"auto", "alias", "registry"}:
-            raise ValueError("SWITCH_MODE must be auto, alias, or registry")
         if self.aura_cloud_provider not in {"gcp", "aws", "azure"}:
             raise ValueError("AURA_CLOUD_PROVIDER must be gcp, aws, or azure")
-        if self.aura_pause_api not in {"v1", "custom"}:
-            raise ValueError("AURA_PAUSE_API must be v1 or custom")
-        if self.aura_pause_api == "custom" and (
-            not self.aura_pause_path_template or not self.aura_resume_path_template
-        ):
-            raise ValueError("AURA_PAUSE_API=custom requires pause and resume path templates")
         if not _PREFIX.fullmatch(self.aura_instance_name_prefix):
             raise ValueError(
                 "AURA_INSTANCE_NAME_PREFIX must be lowercase letters, digits, and dashes"
             )
         if self.aura_max_runtime_minutes < 1:
             raise ValueError("AURA_MAX_RUNTIME_MINUTES must be at least 1")
-        if self.pause_iterations < 0:
-            raise ValueError("PAUSE_ITERATIONS must be 0 (pause disabled) or more")
-        need = 2 * len(tenants) + 1
+        need = len(tenants) + 2
         allowed = 5 * self.memory_gb
         if need > allowed:
             raise ValueError(
                 f"capacity: {len(tenants)} tenants need {need} database slots during a swap "
-                f"(2 per tenant plus the default neo4j database) but {self.aura_memory} allows "
-                f"{allowed:g}. Use fewer tenants or more memory."
+                f"(1 per tenant, 1 for the tenant being refreshed, and the default neo4j database) "
+                f"but {self.aura_memory} allows {allowed:g}. Use fewer tenants or more memory."
             )
         return self
 

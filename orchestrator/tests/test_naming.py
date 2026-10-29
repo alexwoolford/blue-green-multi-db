@@ -2,20 +2,12 @@ import pytest
 
 from bluegreen.config import Settings
 from bluegreen.errors import ConfigError
-from bluegreen.naming import (
-    alias_name,
-    db_name,
-    next_cycle,
-    prior_cycle,
-    quote_ident,
-    validate_tenant,
-)
+from bluegreen.naming import db_name, next_cycle, quote_ident, validate_tenant
 
 
 def test_accepts_acme():
     assert validate_tenant("acme") == "acme"
     assert db_name("acme", "c0002") == "acme-c0002"
-    assert alias_name("acme") == "acme"
     assert quote_ident("acme-c0002") == "`acme-c0002`"
 
 
@@ -44,8 +36,6 @@ def test_length_bounds():
 def test_cycles():
     assert next_cycle(None) == "c0001"
     assert next_cycle("c0002") == "c0003"
-    assert prior_cycle("c0001") is None
-    assert prior_cycle("c0002") == "c0001"
     with pytest.raises(ValueError):
         next_cycle("c9999")
     with pytest.raises(ValueError):
@@ -53,7 +43,8 @@ def test_cycles():
 
 
 def test_capacity_check_counts_neo4j():
-    tenants = ",".join(f"t{i:02d}" for i in range(6))
+    # 4 tenants + 1 being refreshed fit in 1GB (5 databases) only if neo4j is not counted.
+    tenants = ",".join(f"t{i:02d}" for i in range(4))
     with pytest.raises((ValueError, ConfigError)):
         Settings(
             tenants=tenants,

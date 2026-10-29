@@ -1,4 +1,4 @@
-"""neo4j-admin wrappers. Flag spellings come from doctor findings when present."""
+"""neo4j-admin wrappers. `bg doctor` checks that these flags exist before they are used."""
 
 from __future__ import annotations
 
@@ -6,52 +6,10 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
 
 from bluegreen.config import Settings
 from bluegreen.errors import AdminError
-from bluegreen.redact import redact
-
-_DEFAULT_FLAGS = {
-    "from_path": "--from-path",
-    "to_uri": "--to-uri",
-    "to_dbid": "--to-dbid",
-    "overwrite": "--overwrite-destination",
-    "to_user": "--to-user",
-    "to_password": "--to-password",
-    "additional_config": "--additional-config",
-    "id_type": "--id-type",
-    "nodes": "--nodes",
-    "relationships": "--relationships",
-    "to_path": "--to-path",
-    "schema": "--schema",
-}
-
-
-def findings_path(work: Path) -> Path:
-    return work / "doctor" / "findings.json"
-
-
-def load_findings(work: Path) -> dict[str, Any]:
-    path = findings_path(work)
-    if not path.exists():
-        return {}
-    import json
-
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _flags(findings: dict[str, Any]) -> dict[str, str]:
-    merged = dict(_DEFAULT_FLAGS)
-    custom = findings.get("flags") or {}
-    for key, value in custom.items():
-        if isinstance(value, str) and value:
-            merged[key] = value
-    return merged
-
-
-def _opt(flag: str, value: str) -> str:
-    return f"{flag}={value}"
+from bluegreen.redact import add_secret, redact
 
 
 def run_admin(
@@ -83,10 +41,9 @@ def run_admin(
         raise AdminError(step, completed.returncode, str(log_path), tail)
 
 
-def _env(settings: Settings, findings: dict[str, Any]) -> dict[str, str]:
+def _env(settings: Settings) -> dict[str, str]:
     env = os.environ.copy()
-    heap_var = findings.get("heap_env") or "HEAP_SIZE"
-    env[str(heap_var)] = settings.admin_heap_size
+    env["HEAP_SIZE"] = settings.admin_heap_size
     return env
 
 
@@ -99,8 +56,6 @@ def import_args(
     *,
     overwrite: bool,
 ) -> list[str]:
-    findings = load_findings(settings.work_path())
-    flags = _flags(findings)
     data = settings.work_path() / "data" / tenant / cycle
     conf = settings.conf_dir() / conf_name
     args = [
@@ -109,22 +64,18 @@ def import_args(
         "import",
         "full",
         database,
-        _opt(flags["additional_config"], str(conf)),
-        _opt(flags["id_type"], "string"),
-        _opt(flags["nodes"], f"Customer={data / 'customers.csv.gz'}"),
-        _opt(flags["nodes"], f"Account={data / 'accounts.csv.gz'}"),
-        _opt(flags["nodes"], f"Merchant={data / 'merchants.csv.gz'}"),
-        _opt(flags["nodes"], f"Snapshot={data / 'snapshot.csv'}"),
-        _opt(flags["relationships"], f"OWNS={data / 'owns.csv.gz'}"),
-        _opt(flags["relationships"], f"SENT={data / 'sent.csv.gz'}"),
-        _opt(flags["relationships"], f"PAID={data / 'paid.csv.gz'}"),
+        f"--additional-config={conf}",
+        "--id-type=string",
+        f"--nodes=Customer={data / 'customers.csv.gz'}",
+        f"--nodes=Account={data / 'accounts.csv.gz'}",
+        f"--nodes=Merchant={data / 'merchants.csv.gz'}",
+        f"--nodes=Snapshot={data / 'snapshot.csv'}",
+        f"--relationships=OWNS={data / 'owns.csv.gz'}",
+        f"--relationships=SENT={data / 'sent.csv.gz'}",
+        f"--relationships=PAID={data / 'paid.csv.gz'}",
     ]
     if overwrite:
-        args.append(_opt(flags["overwrite"], "true"))
-    if settings.import_with_schema and findings.get("has_schema"):
-        from bluegreen.cypher import schema_file
-
-        args.append(_opt(flags["schema"], str(schema_file())))
+        args.append("--overwrite-destination=true")
     return args
 
 
@@ -138,11 +89,10 @@ def import_full(
     overwrite: bool,
     log_path: Path,
 ) -> None:
-    findings = load_findings(settings.work_path())
     run_admin(
         import_args(settings, database, tenant, cycle, conf_name, overwrite=overwrite),
         log_path=log_path,
-        env=_env(settings, findings),
+        env=_env(settings),
         step="import",
     )
 
@@ -154,8 +104,6 @@ def dump_database(
     dest: Path,
     log_path: Path,
 ) -> int:
-    findings = load_findings(settings.work_path())
-    flags = _flags(findings)
     dest.mkdir(parents=True, exist_ok=True)
     conf = settings.conf_dir() / conf_name
     args = [
@@ -163,11 +111,11 @@ def dump_database(
         "database",
         "dump",
         database,
-        _opt(flags["additional_config"], str(conf)),
-        _opt(flags["to_path"], str(dest)),
-        _opt(flags["overwrite"], "true"),
+        f"--additional-config={conf}",
+        f"--to-path={dest}",
+        "--overwrite-destination=true",
     ]
-    run_admin(args, log_path=log_path, env=_env(settings, findings), step="dump")
+    run_admin(args, log_path=log_path, env=_env(settings), step="dump")
     dump_file = dest / f"{database}.dump"
     if not dump_file.exists():
         matches = list(dest.glob("*.dump"))
@@ -189,32 +137,19 @@ def upload_database(
     password: str,
     log_path: Path,
 ) -> None:
-    from bluegreen.redact import add_secret
-
     add_secret(password)
-    findings = load_findings(settings.work_path())
-    flags = _flags(findings)
-    env = _env(settings, findings)
+    # Credentials go in the environment (documented defaults of --to-user/--to-password), not on the command line.
+    env = _env(settings)
+    env["NEO4J_USERNAME"] = user
+    env["NEO4J_PASSWORD"] = password
     args = [
         "neo4j-admin",
         "database",
         "upload",
         database,
-        _opt(flags["from_path"], str(dump_dir)),
-        _opt(flags["to_uri"], uri),
-        _opt(flags["to_dbid"], db_id),
-        _opt(flags["overwrite"], "true"),
+        f"--from-path={dump_dir}",
+        f"--to-uri={uri}",
+        f"--to-dbid={db_id}",
+        "--overwrite-destination=true",
     ]
-    password_env = findings.get("upload_password_env")
-    user_env = findings.get("upload_user_env")
-    if password_env:
-        env[str(password_env)] = password
-        if user_env:
-            env[str(user_env)] = user
-        elif flags.get("to_user"):
-            args.append(_opt(flags["to_user"], user))
-    else:
-        if flags.get("to_user"):
-            args.append(_opt(flags["to_user"], user))
-        args.append(_opt(flags["to_password"], password))
     run_admin(args, log_path=log_path, env=env, step="upload")

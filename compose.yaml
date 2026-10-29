@@ -16,7 +16,6 @@ services:
       - "17687:7687"
     volumes:
       - local-data:/data
-      - ./work:/work:ro
     healthcheck:
       test: ["CMD-SHELL", "cypher-shell -u neo4j -p \"$${NEO4J_AUTH#neo4j/}\" 'RETURN 1' >/dev/null 2>&1"]
       interval: 5s

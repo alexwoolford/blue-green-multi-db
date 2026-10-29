@@ -3,6 +3,7 @@
 up:
 	mkdir -p work
 	docker compose up -d neo4j-local
+	docker compose build toolbox
 
 doctor: up
 	docker compose run --rm toolbox doctor

@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import logging
-import shutil
 import time
 from pathlib import Path
 
-from bluegreen.util import utc_now
-
 from neo4j.exceptions import Neo4jError
 
-from bluegreen.admin import dump_database, import_full
+from bluegreen.admin import import_full
 from bluegreen.config import Settings
 from bluegreen.cypher import (
     apply_schema,
@@ -22,7 +19,7 @@ from bluegreen.cypher import (
     node_count,
     read_snapshot_cycle,
     remove_store,
-    seed_provider_settings,
+    run_system,
     show_databases,
     verify_database,
     wait_until_online,
@@ -30,15 +27,15 @@ from bluegreen.cypher import (
 from bluegreen.errors import VerificationError
 from bluegreen.generator import generate, read_manifest
 from bluegreen.ledger import Ledger, open_ledger
-from bluegreen.naming import db_name, prior_cycle, validate_cycle, validate_tenant
+from bluegreen.naming import cycle_number, db_name, format_cycle, next_cycle, validate_cycle, validate_tenant
 from bluegreen.redact import redact
-from bluegreen.state import record_oq, save_route
+from bluegreen.state import save_route
 from bluegreen.switch import AliasSwitch
+from bluegreen.util import utc_now
 from bluegreen.watcher import Watcher
 
 logger = logging.getLogger("bluegreen.local")
 SERVER_DATA = Path("/local-data")
-SERVER_WORK = "/work"
 
 
 def _rel(ledger: Ledger, path: Path) -> str:
@@ -49,8 +46,6 @@ def _rel(ledger: Ledger, path: Path) -> str:
 
 
 def infer_next_cycle(driver, tenant: str) -> str:
-    from bluegreen.naming import cycle_number, format_cycle, next_cycle
-
     strategy = AliasSwitch(driver)
     current = None
     try:
@@ -111,7 +106,7 @@ def run_local_cycle(
             details["exit_code"] = 0
             details["log"] = _rel(ledger, log_path)
 
-        _mount(settings, driver, ledger, tenant, cycle, database)
+        _mount(driver, ledger, tenant, cycle, database)
         manifest = read_manifest(settings.work_path(), tenant, cycle)
 
         with ledger.step("schema", target="local", tenant=tenant, cycle=cycle):
@@ -130,10 +125,11 @@ def run_local_cycle(
             time.sleep(2)
 
         with ledger.step("switch", target="local", tenant=tenant, cycle=cycle) as details:
-            result = strategy.switch(tenant, database, cycle)
+            result = strategy.switch(tenant, database)
             details["switch_mode"] = result.mode
             details["admin_path"] = result.admin_path
             details["database"] = result.database
+            details["previous"] = result.previous
             save_route(
                 settings.work_path(),
                 "local",
@@ -147,13 +143,13 @@ def run_local_cycle(
             if seen != cycle:
                 raise VerificationError(f"alias {tenant} returned cycle {seen!r}, expected {cycle!r}")
 
-        previous = prior_cycle(cycle)
-        if previous:
-            previous_db = db_name(tenant, previous)
-            if database_status(driver, previous_db) is not None:
+        # Drop what the alias pointed at before the switch, but only a database this harness named.
+        previous = result.previous
+        if previous and previous != database and previous.startswith(f"{tenant}-c"):
+            if database_status(driver, previous) is not None:
                 with ledger.step("db_drop", target="local", tenant=tenant, cycle=cycle) as details:
-                    details["dropped"] = previous_db
-                    drop_database(driver, previous_db)
+                    details["dropped"] = previous
+                    drop_database(driver, previous)
         if watcher is not None:
             time.sleep(2)
         return ledger
@@ -163,7 +159,7 @@ def run_local_cycle(
         driver.close()
 
 
-def _mount(settings: Settings, driver, ledger: Ledger, tenant: str, cycle: str, database: str) -> None:
+def _mount(driver, ledger: Ledger, tenant: str, cycle: str, database: str) -> None:
     reason = None
     create_started = utc_now()
     create_t0 = time.perf_counter()
@@ -175,7 +171,7 @@ def _mount(settings: Settings, driver, ledger: Ledger, tenant: str, cycle: str, 
         transitions = wait_until_online(driver, database, timeout_s=300)
         online_s = time.perf_counter() - online_t0
         if node_count(driver, database) == 0:
-            reason = "[import-in-place] CREATE DATABASE came online with an empty store"
+            reason = "CREATE DATABASE came online with an empty store"
         else:
             ledger.write(
                 step="db_create",
@@ -197,12 +193,6 @@ def _mount(settings: Settings, driver, ledger: Ledger, tenant: str, cycle: str, 
                 ok=True,
                 details={"transitions": transitions},
             )
-            record_oq(
-                settings.work_path(),
-                "OQ-10",
-                "import in place then CREATE DATABASE mounted the store",
-                f"{database} node count was non-zero after CREATE DATABASE",
-            )
             return
     except Neo4jError as exc:
         reason = redact(str(exc))
@@ -213,52 +203,7 @@ def _mount(settings: Settings, driver, ledger: Ledger, tenant: str, cycle: str, 
     except Neo4jError as exc:
         logger.info("drop after failed mount: %s", redact(str(exc)))
     remove_store(SERVER_DATA, database)
-
-    with ledger.step("import", target="local", tenant=tenant, cycle=cycle) as details:
-        details["local_mode"] = "seed_uri"
-        log_path = ledger.log_dir / f"import-{database}-build.log"
-        import_full(
-            settings,
-            database,
-            tenant,
-            cycle,
-            "build.conf",
-            overwrite=True,
-            log_path=log_path,
-        )
-        details["log"] = _rel(ledger, log_path)
-    dump_dir = settings.work_path() / "dumps" / tenant / cycle
-    with ledger.step("dump", target="local", tenant=tenant, cycle=cycle) as details:
-        log_path = ledger.log_dir / f"dump-{database}.log"
-        details["dump_bytes"] = dump_database(settings, database, "build.conf", dump_dir, log_path)
-        details["log"] = _rel(ledger, log_path)
-        details["local_mode"] = "seed_uri"
-
-    seed_uri = f"file://{SERVER_WORK}/dumps/{tenant}/{cycle}/{database}.dump"
-    with ledger.step("db_create", target="local", tenant=tenant, cycle=cycle) as details:
-        details["local_mode"] = "seed_uri"
-        details["reason"] = reason
-        details["seed_uri"] = seed_uri
-        try:
-            create_database(driver, database, seed_uri=seed_uri)
-        except Neo4jError as exc:
-            providers = seed_provider_settings(driver)
-            details["seed_settings"] = providers
-            record_oq(
-                settings.work_path(),
-                "OQ-10",
-                "in-place mount failed and seedURI was refused",
-                f"{reason}; seedURI error: {redact(str(exc))}; settings: {providers}",
-            )
-            raise
-    with ledger.step("db_online", target="local", tenant=tenant, cycle=cycle):
-        wait_until_online(driver, database, timeout_s=300)
-    record_oq(
-        settings.work_path(),
-        "OQ-10",
-        "in-place mount failed; seedURI fallback was used",
-        reason or "",
-    )
+    raise VerificationError(f"[import-in-place] {database} did not mount the imported store: {reason}")
 
 
 def local_status(settings: Settings) -> None:
@@ -270,8 +215,6 @@ def local_status(settings: Settings) -> None:
             aliases = ",".join(row["aliases"])
             print(f"{row['name']:<24} {row['currentStatus']:<12} {aliases}")
         print("ALIASES")
-        from bluegreen.cypher import run_system
-
         records, _ = run_system(driver, "SHOW ALIASES FOR DATABASE", timeout=60)
         if not records:
             print("(none)")
@@ -284,7 +227,3 @@ def local_status(settings: Settings) -> None:
     finally:
         driver.close()
 
-
-def remove_build_store(database: str) -> None:
-    remove_store(Path("/build-data"), database)
-    shutil.rmtree(Path("/build-data") / "databases" / database, ignore_errors=True)

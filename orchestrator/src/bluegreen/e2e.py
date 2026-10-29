@@ -1,4 +1,4 @@
-"""Full local baseline and Aura refresh. With PAUSE_ITERATIONS > 0, also pause/resume and one post-resume cycle."""
+"""Full local baseline and Aura refresh."""
 
 from __future__ import annotations
 
@@ -6,11 +6,10 @@ import logging
 
 from bluegreen.aura_instance import InstanceGuard, aura_up, finish_aura_up
 from bluegreen.config import Settings
-from bluegreen.cycle_aura import alias_probe, run_aura_cycle
+from bluegreen.cycle_aura import run_aura_cycle
 from bluegreen.cycle_local import run_local_cycle
 from bluegreen.doctor import run_doctor
 from bluegreen.ledger import Ledger, open_ledger
-from bluegreen.pause_timing import run_pause_timing
 from bluegreen.redact import redact
 from bluegreen.report import write_report
 from bluegreen.state import load_aura
@@ -67,16 +66,9 @@ def run_e2e(settings: Settings) -> Ledger:
                 run_local_cycle(settings, tenant, "c0002", watch=True, ledger=ledger)
             aura_up(settings, ledger)
         run_doctor(settings, ledger, aura=True)
-        alias_probe(settings, ledger)
         for tenant in settings.tenant_list:
             run_aura_cycle(settings, tenant, "c0001", watch=False, ledger=ledger)
             run_aura_cycle(settings, tenant, "c0002", watch=True, ledger=ledger)
-        if settings.pause_iterations > 0:
-            run_pause_timing(settings, ledger)
-            first = settings.tenant_list[0]
-            run_aura_cycle(settings, first, "c0003", watch=False, ledger=ledger)
-        else:
-            logger.info("pause/resume skipped (PAUSE_ITERATIONS=0)")
         return ledger
     finally:
         try:

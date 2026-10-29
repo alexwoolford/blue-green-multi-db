@@ -2,7 +2,6 @@ import json
 
 import pytest
 
-from bluegreen.config import Settings
 from bluegreen.report import write_report
 from bluegreen.watcher import summarize_watcher
 
@@ -44,13 +43,6 @@ def _write_run(tmp_path, ledger_rows: list[dict], reads: list[dict]):
     watcher = run_dir / "watcher-aura-acme.jsonl"
     watcher.write_text("".join(json.dumps(row) + "\n" for row in reads), encoding="utf-8")
     return watcher
-
-
-def test_pause_defaults_to_disabled(monkeypatch):
-    monkeypatch.delenv("PAUSE_ITERATIONS", raising=False)
-    assert Settings(_env_file=None).pause_iterations == 0
-    with pytest.raises(ValueError):
-        Settings(_env_file=None, pause_iterations=-1)
 
 
 def test_summary_gap_and_no_old_after_new(tmp_path):
@@ -106,11 +98,3 @@ def test_report_uses_the_switch_seen_by_the_watcher(tmp_path):
     assert '"new_cycle": "c0002"' in text
     assert '"last_old_cycle_at": "2026-10-28T14:34:02.554Z"' in text
     assert '"gap_s": 1.214' in text
-
-
-def test_report_marks_pause_as_not_run(tmp_path):
-    _write_run(tmp_path, [_ledger_row("switch", "c0002", "2026-10-28T14:34:03.000Z")], [])
-    text = write_report(tmp_path, RUN_ID).read_text(encoding="utf-8")
-    assert "not run (PAUSE_ITERATIONS=0)" in text
-    assert "Pause/resume was not run" in text
-    assert "billed at a discounted rate" not in text
